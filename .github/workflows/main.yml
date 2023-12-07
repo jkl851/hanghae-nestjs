@@ -7,6 +7,9 @@ env:
   DOCKER_IMAGE: ${{ github.repository }}
   # github.repository변수는 owner/repository로 구성 ex)goodonion/nest_test
   DOCKER_CONTAINER: my_nest_server
+  AWS_REGION: ap-northeast-2
+  ECR_REGISTRY: 276173553022.dkr.ecr.ap-northeast-2.amazonaws.com/repo-nestjs
+  ECR_REPOSITORY: repo-nestjs
 
 #이벤트
 # main 브랜치에 한하여 push가 일어날 경우
@@ -71,26 +74,44 @@ jobs:
         push: true
         tags: ${{ env.REGISTRY }}/${{ env.DOCKER_IMAGE }}:latest
 
-  # ec2 환경에 배포
+  # aws ec2 환경에 배포
+  steps:
+      - name: Checkout
+        uses: actions/checkout@v2
 
-  deploy:
-    needs: build
-    # ec2에 설치한 Runner로 job 실행 
-    # selfhost runner 설정 안해줄 경우 runner를 찾을 수 없어 action이 진행되지 않음
-    runs-on: self-hosted
-    # runs-on: ubuntu-22.04
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-    # Github Container Registry 로그인
-    # Docker Container 중지 및 삭제, Docker image 삭제
-    # 새로 배포한 Docker Image로 Container 실행
-    steps:
-    - name: Login to ghcr
-      uses: docker/login-action@v2 
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.MY_ACC_TOKEN }}
-    - name: Run docker
-      run: |
-          docker stop ${{ env.DOCKER_CONTAINER }} && docker rm ${{ env.DOCKER_CONTAINER }} && docker rmi ${{ env.REGISTRY }}/${{ env.DOCKER_IMAGE }}:latest 
-          docker run -d -p 3001:3001 --name ${{ env.DOCKER_CONTAINER }} --restart always ${{ env.REGISTRY }}/${{ env.DOCKER_IMAGE }}:latest
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+      - name: Fill in the new image ID in the Amazon ECS task definition
+        id: setting-task-definition
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: container-nestjs
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Deploy Amazon ECS task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.setting-task-definition.outputs.task-definition }}
+          service: service-nestjs
+          cluster: nestjs-cluster
+          wait-for-service-stability: false
