@@ -1,0 +1,96 @@
+# 해당 워크플로우의 타이틀
+# 명시하지 않으면 파일 경로가 타이틀이 됨
+name: CICD my-nestjs
+# 환경변수
+env:
+  REGISTRY: ghcr.io
+  DOCKER_IMAGE: ${{ github.repository }}
+  # github.repository변수는 owner/repository로 구성 ex)goodonion/nest_test
+  DOCKER_CONTAINER: my_nest_server
+
+#이벤트
+# main 브랜치에 한하여 push가 일어날 경우
+on:
+  push:
+    branches: ["main"]
+
+# jobs
+
+# 이벤트가 발생하면 해야할 작업을 명시
+# 테스트, 빌드, 배포 단위로 명시
+# 각각의 job은 Runner라는 컨테이너에서 개별적으로 실행
+jobs:
+  # 프로젝트 코드 테스트 With Jest 
+  test:
+    # ubuntu-latest 환경의 Runner에서 실행
+    runs-on: ubuntu-latest
+
+    # 컨테이너에 repository의 코드를 checkout 
+    # node 환경 셋업
+    # 의존성 설치 및 테스트 진행
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v3
+      - name: Setup node.js 18.0.0
+        uses: actions/setup-node@v3 
+        with: 
+          node-version: 18.0.0
+          cache: 'yarn'
+      - run: yarn install
+      - run: yarn run test:e2e
+
+  # 도커 이미지 빌드
+
+  build:
+
+    # build가 시작되려면 test가 완료되어야 함
+    needs: test
+    runs-on: ubuntu-latest
+
+    # Runner 에 repository의 코드를 checkout
+    # 컨테이너에 도커 환경 셋업
+    # Github Container Registry 로그인
+    # 도커 이미지 빌드 후 ghcr에 push
+
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v3
+    - name: Set up docker build
+      id: buildx
+      uses: docker/setup-buildx-action@v2
+    - name: Login to ghcr
+      uses: docker/login-action@v2 
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.MY_ACC_TOKEN }}
+    - name: Build and Push
+      id: docker_build
+      uses: docker/build-push-action@v3
+      with:
+        push: true
+        tags: ${{ env.REGISTRY }}/${{ env.DOCKER_IMAGE }}:latest
+
+  # ec2 환경에 배포
+
+  deploy:
+    needs: build
+    # ec2에 설치한 Runner로 job 실행 
+    # selfhost runner 설정 안해줄 경우 runner를 찾을 수 없어 action이 진행되지 않음
+    runs-on: self-hosted
+    # runs-on: ubuntu-22.04
+
+    # Github Container Registry 로그인
+    # Docker Container 중지 및 삭제, Docker image 삭제
+    # 새로 배포한 Docker Image로 Container 실행
+    steps:
+    - name: Login to ghcr
+      uses: docker/login-action@v2 
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.MY_ACC_TOKEN }}
+    - name: Run docker
+      run: |
+          docker stop ${{ env.DOCKER_CONTAINER }} && docker rm ${{ env.DOCKER_CONTAINER }} && docker rmi ${{ env.REGISTRY }}/${{ env.DOCKER_IMAGE }}:latest 
+          docker run -d -p 3001:3001 --name ${{ env.DOCKER_CONTAINER }} --restart always ${{ env.REGISTRY }}/${{ env.DOCKER_IMAGE }}:latest
